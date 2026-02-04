@@ -13,11 +13,221 @@ import time
 import subprocess
 import datetime
 import pytz
+import importlib.util
+from dotenv import load_dotenv
 
+# Helper to import bot-hosting.py (hyphen in name requires special import)
+_bot_hosting_module = None
 
+def _get_bot_module():
+    """Get the bot-hosting module (with caching)"""
+    global _bot_hosting_module
+    if _bot_hosting_module is None:
+        bot_file = os.path.join(os.path.dirname(__file__), "bot-hosting.py")
+        spec = importlib.util.spec_from_file_location("bot_hosting", bot_file)
+        _bot_hosting_module = importlib.util.module_from_spec(spec)
+        # Don't execute the module - just use it to access already-loaded objects
+        # Since god_mode_panel is imported by bot-hosting, we can use sys.modules
+        import sys
+        if 'bot_hosting' in sys.modules:
+            _bot_hosting_module = sys.modules['bot_hosting']
+        elif '__main__' in sys.modules:
+            # If running as main, use __main__
+            _bot_hosting_module = sys.modules['__main__']
+    return _bot_hosting_module
+
+# Load environment variables from .env file
+load_dotenv()
 # Control Panel Channel - loaded from environment variables
 GOD_MODE_PANEL_CHANNEL_ID = int(os.getenv('GOD_MODE_PANEL_CHANNEL_ID', '0'))
+
+# God Mode User ID - loaded from environment variables
 GOD_MODE_USER_ID = int(os.getenv('GOD_MODE_USER_ID', '0'))
+GOD_MODE_USER_IDS = [GOD_MODE_USER_ID] if GOD_MODE_USER_ID else []
+
+# Lockdown state file
+LOCKDOWN_FILE_PATH = os.path.join(os.path.dirname(__file__), "lockdown_state.json")
+
+def is_lockdown_active() -> bool:
+    """Check if bot is in lockdown mode"""
+    try:
+        if os.path.exists(LOCKDOWN_FILE_PATH):
+            with open(LOCKDOWN_FILE_PATH, 'r') as f:
+                data = json.load(f)
+                return data.get('active', False)
+    except:
+        pass
+    return False
+
+def set_lockdown_state(active: bool, reason: str = None) -> dict:
+    """Set lockdown state"""
+    state = {
+        'active': active,
+        'reason': reason or ("Maintenance in progress" if active else None),
+        'updated_at': datetime.datetime.now().isoformat(),
+        'updated_by': GOD_MODE_USER_ID
+    }
+    with open(LOCKDOWN_FILE_PATH, 'w') as f:
+        json.dump(state, f, indent=2)
+    return state
+
+def get_lockdown_state() -> dict:
+    """Get current lockdown state"""
+    try:
+        if os.path.exists(LOCKDOWN_FILE_PATH):
+            with open(LOCKDOWN_FILE_PATH, 'r') as f:
+                return json.load(f)
+    except:
+        pass
+    return {'active': False, 'reason': None}
+
+
+class GlobalAnnouncementModal(Modal):
+    """Modal for composing global announcement message"""
+    
+    def __init__(self):
+        super().__init__(title="📢 Global Announcement")
+        
+        self.title_input = TextInput(
+            label="Title",
+            placeholder="e.g., Bot Update, Maintenance Notice",
+            required=True,
+            max_length=100,
+            style=discord.TextStyle.short
+        )
+        
+        self.message_input = TextInput(
+            label="Message",
+            placeholder="Enter your announcement message here...",
+            required=True,
+            max_length=2000,
+            style=discord.TextStyle.paragraph
+        )
+        
+        self.add_item(self.title_input)
+        self.add_item(self.message_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """Send announcement to allowed channels only"""
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            # Use interaction.client to get the actual running bot instance
+            bot_client = interaction.client
+            
+            title = self.title_input.value
+            message = self.message_input.value
+            
+            # Create announcement embed
+            embed = discord.Embed(
+                title=f"📢 {title}",
+                description=message,
+                color=discord.Color.gold(),
+                timestamp=datetime.datetime.now()
+            )
+            embed.set_footer(text="Fan-Count Bot Announcement")
+            
+            # Load allowed channels from config file
+            allowed_channels_file = os.path.join(os.path.dirname(__file__), "allowed_channels_config.json")
+            allowed_channels = []
+            
+            try:
+                if os.path.exists(allowed_channels_file):
+                    with open(allowed_channels_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    allowed_channels = data.get('channels', [])
+            except Exception as e:
+                print(f"⚠️ Error loading channels config: {e}")
+            
+            if not allowed_channels:
+                await interaction.followup.send(
+                    "⚠️ **No channels configured!**\n\n"
+                    "Use `/set_channel` to add channels first.",
+                    ephemeral=True
+                )
+                return
+            
+            # Track results
+            success_count = 0
+            failed_count = 0
+            failed_channels = []
+            
+            # Send to allowed channels only
+            for ch_data in allowed_channels:
+                channel_id = ch_data.get('channel_id')
+                channel_name = ch_data.get('channel_name', 'Unknown')
+                server_name = ch_data.get('server_name', 'Unknown')
+                
+                try:
+                    channel = bot_client.get_channel(channel_id)
+                    
+                    if channel and channel.permissions_for(channel.guild.me).send_messages:
+                        await channel.send(embed=embed)
+                        success_count += 1
+                    else:
+                        failed_count += 1
+                        failed_channels.append(f"#{channel_name} ({server_name})")
+                        
+                except discord.Forbidden:
+                    failed_count += 1
+                    failed_channels.append(f"#{channel_name} (forbidden)")
+                except Exception as e:
+                    failed_count += 1
+                    failed_channels.append(f"#{channel_name} ({str(e)[:20]})")
+            
+            # Report results
+            result_message = (
+                f"✅ **Announcement sent!**\n\n"
+                f"**Successful:** {success_count} channels\n"
+                f"**Failed:** {failed_count} channels"
+            )
+            
+            if failed_channels and len(failed_channels) <= 10:
+                result_message += f"\n\n**Failed channels:**\n" + "\n".join(f"• {c}" for c in failed_channels)
+            elif failed_channels:
+                result_message += f"\n\n**Failed channels:** {len(failed_channels)} (too many to list)"
+                
+            await interaction.followup.send(result_message, ephemeral=True)
+            
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+
+class LockdownReasonModal(Modal):
+    """Modal for entering lockdown reason"""
+    
+    def __init__(self):
+        super().__init__(title="🔒 Enable Lockdown")
+        
+        self.reason_input = TextInput(
+            label="Reason (optional)",
+            placeholder="e.g., Bot update in progress, Maintenance",
+            required=False,
+            max_length=200,
+            style=discord.TextStyle.short,
+            default="Maintenance in progress"
+        )
+        
+        self.add_item(self.reason_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """Enable lockdown with reason"""
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            reason = self.reason_input.value or "Maintenance in progress"
+            state = set_lockdown_state(True, reason)
+            
+            await interaction.followup.send(
+                f"🔒 **Lockdown ENABLED**\n\n"
+                f"**Reason:** {reason}\n\n"
+                f"All commands are now restricted. Only God Mode users can use the bot.\n"
+                f"Use the **Unlock** button to disable lockdown.",
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
 
 class GodModeControlPanel(View):
@@ -28,7 +238,7 @@ class GodModeControlPanel(View):
     
     def is_god_mode(self, interaction: discord.Interaction) -> bool:
         """Check if user is God mode"""
-        return interaction.user.id == GOD_MODE_USER_ID
+        return interaction.user.id in GOD_MODE_USER_IDS
     
     # Row 1: Cache Management
     @discord.ui.button(
@@ -46,7 +256,9 @@ class GodModeControlPanel(View):
         await interaction.response.defer(ephemeral=True)
         
         try:
-            from bot import smart_cache, client
+            bot_module = _get_bot_module()
+            smart_cache = bot_module.smart_cache
+            client = bot_module.client
             stats = smart_cache.get_stats()
             
             embed = discord.Embed(
@@ -91,7 +303,8 @@ class GodModeControlPanel(View):
         await interaction.response.defer(ephemeral=True)
         
         try:
-            from bot import smart_cache
+            bot_module = _get_bot_module()
+            smart_cache = bot_module.smart_cache
             before_stats = smart_cache.get_stats()
             total_entries = before_stats['total_entries']
             total_size_mb = before_stats['total_size_mb']
@@ -128,7 +341,8 @@ class GodModeControlPanel(View):
         
         # Save restart info
         try:
-            from bot import RESTART_FILE_PATH
+            bot_module = _get_bot_module()
+            RESTART_FILE_PATH = bot_module.RESTART_FILE_PATH
             restart_data = {
                 "channel_id": interaction.channel_id,
                 "message_id": message.id,
@@ -162,7 +376,8 @@ class GodModeControlPanel(View):
         await interaction.response.defer(ephemeral=True)
         
         try:
-            from bot import client
+            bot_module = _get_bot_module()
+            client = bot_module.client
             
             # Reset cooldown to force refresh
             client.last_cache_update_time = 0
@@ -194,22 +409,29 @@ class GodModeControlPanel(View):
             await interaction.response.send_message("❌ Unauthorized", ephemeral=True)
             return
         
-        await interaction.response.send_message(
+        # Defer immediately to prevent timeout (interaction lasts only 3s)
+        await interaction.response.defer(ephemeral=True)
+        
+        # Send initial message via followup (this won't expire)
+        status_msg = await interaction.followup.send(
             "📡 **Starting full data sync...**\n"
             "• Fetching ranks from uma.moe API\n"
             "• Syncing member daily data to Google Sheets\n"
             "• Applying Yui logic for late joiners\n\n"
             "This may take a while...", 
-            ephemeral=True
+            ephemeral=True,
+            wait=True
         )
         
         try:
-            from bot import update_club_data_task
+            bot_module = _get_bot_module()
+            update_club_data_task = bot_module.update_club_data_task
             
             # Run the merged task (updates ranks + syncs member data)
             await update_club_data_task.coro()
             
-            await interaction.edit_original_response(
+            # Edit the status message (followup messages don't expire)
+            await status_msg.edit(
                 content=(
                     "✅ **Full data sync complete!**\n\n"
                     "• Ranks updated in Clubs_Config\n"
@@ -218,7 +440,7 @@ class GodModeControlPanel(View):
                 )
             )
         except Exception as e:
-            await interaction.edit_original_response(content=f"❌ Error: {e}")
+            await status_msg.edit(content=f"❌ Error: {e}")
     
     @discord.ui.button(
         label="📤 Sync to Supabase",
@@ -227,24 +449,32 @@ class GodModeControlPanel(View):
         row=1
     )
     async def sync_supabase(self, interaction: discord.Interaction, button: Button):
-        """Manually trigger sync to Supabase"""
+        """Manually trigger sync to Supabase (deprecated - no longer used)"""
         if not self.is_god_mode(interaction):
             await interaction.response.send_message("❌ Unauthorized", ephemeral=True)
             return
         
-        await interaction.response.send_message("📤 **Starting Supabase sync...**\nThis may take a while.", ephemeral=True)
+        # Defer immediately to prevent timeout
+        await interaction.response.defer(ephemeral=True)
         
         try:
-            from bot import auto_sync_to_supabase
+            bot_module = _get_bot_module()
+            auto_refresh_data_cache = bot_module.auto_refresh_data_cache
             
-            # Run the task manually
-            await auto_sync_to_supabase.coro()
+            # Run cache refresh instead (Supabase sync was removed)
+            status_msg = await interaction.followup.send(
+                "📤 **Starting data refresh...**\nThis may take a while.", 
+                ephemeral=True,
+                wait=True
+            )
             
-            await interaction.edit_original_response(
-                content="✅ **Supabase sync complete!**\nCheck console for details."
+            await auto_refresh_data_cache.coro()
+            
+            await status_msg.edit(
+                content="✅ **Data refresh complete!**\nCheck console for details."
             )
         except Exception as e:
-            await interaction.edit_original_response(content=f"❌ Error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
     
     # Row 3: Channel Management
     @discord.ui.button(
@@ -254,7 +484,7 @@ class GodModeControlPanel(View):
         row=2
     )
     async def clear_channels(self, interaction: discord.Interaction, button: Button):
-        """Clear all channel restrictions"""
+        """Clear all channel restrictions - with backup"""
         if not self.is_god_mode(interaction):
             await interaction.response.send_message("❌ Unauthorized", ephemeral=True)
             return
@@ -262,30 +492,143 @@ class GodModeControlPanel(View):
         await interaction.response.defer(ephemeral=True)
         
         try:
-            from bot import ALLOWED_CHANNELS_CONFIG_FILE, config
+            bot_module = _get_bot_module()
+            ALLOWED_CHANNELS_CONFIG_FILE = bot_module.ALLOWED_CHANNELS_CONFIG_FILE
+            config = bot_module.config
             
-            if os.path.exists(ALLOWED_CHANNELS_CONFIG_FILE):
-                os.remove(ALLOWED_CHANNELS_CONFIG_FILE)
+            if not os.path.exists(ALLOWED_CHANNELS_CONFIG_FILE):
+                await interaction.followup.send("ℹ️ No channel config file exists.", ephemeral=True)
+                return
             
+            # Load current data for backup and count
+            with open(ALLOWED_CHANNELS_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                current_data = json.load(f)
+            
+            channel_count = len(current_data.get('channels', []))
+            
+            if channel_count == 0:
+                await interaction.followup.send("ℹ️ No channels to clear.", ephemeral=True)
+                return
+            
+            # Create backup before clearing
+            backup_dir = os.path.join(os.path.dirname(__file__), "backups")
+            os.makedirs(backup_dir, exist_ok=True)
+            
+            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_file = os.path.join(backup_dir, f"allowed_channels_backup_{timestamp}.json")
+            
+            with open(backup_file, 'w', encoding='utf-8') as f:
+                json.dump(current_data, f, indent=2, ensure_ascii=False)
+            
+            # Now clear the channels
+            os.remove(ALLOWED_CHANNELS_CONFIG_FILE)
             config.ALLOWED_CHANNEL_IDS = []
             
             await interaction.followup.send(
-                "✅ **All channel restrictions cleared**\n"
-                "Bot can now be used in all channels",
+                f"✅ **All channel restrictions cleared**\n\n"
+                f"🗑️ Removed: **{channel_count}** channels\n"
+                f"💾 Backup saved: `backups/{os.path.basename(backup_file)}`\n\n"
+                f"Bot can now be used in all channels.",
                 ephemeral=True
             )
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+    
+    # Row 3: Global Controls
+    @discord.ui.button(
+        label="📢 Announcement",
+        style=discord.ButtonStyle.primary,
+        custom_id="gm_announcement",
+        row=2
+    )
+    async def global_announcement(self, interaction: discord.Interaction, button: Button):
+        """Send announcement to all servers"""
+        if not self.is_god_mode(interaction):
+            await interaction.response.send_message("❌ Unauthorized", ephemeral=True)
+            return
+        
+        # Show modal
+        modal = GlobalAnnouncementModal()
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(
+        label="🔒 Lock Down",
+        style=discord.ButtonStyle.danger,
+        custom_id="gm_lockdown",
+        row=2
+    )
+    async def lockdown(self, interaction: discord.Interaction, button: Button):
+        """Enable lockdown mode"""
+        if not self.is_god_mode(interaction):
+            await interaction.response.send_message("❌ Unauthorized", ephemeral=True)
+            return
+        
+        # Check if already locked
+        if is_lockdown_active():
+            state = get_lockdown_state()
+            await interaction.response.send_message(
+                f"⚠️ **Already in lockdown mode**\n\n"
+                f"**Reason:** {state.get('reason', 'N/A')}\n"
+                f"**Since:** {state.get('updated_at', 'N/A')}\n\n"
+                f"Use **Unlock** button to disable lockdown.",
+                ephemeral=True
+            )
+            return
+        
+        # Show modal for reason
+        modal = LockdownReasonModal()
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(
+        label="🔓 Unlock",
+        style=discord.ButtonStyle.success,
+        custom_id="gm_unlock",
+        row=2
+    )
+    async def unlock(self, interaction: discord.Interaction, button: Button):
+        """Disable lockdown mode"""
+        if not self.is_god_mode(interaction):
+            await interaction.response.send_message("❌ Unauthorized", ephemeral=True)
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            if not is_lockdown_active():
+                await interaction.followup.send(
+                    "ℹ️ **Lockdown is not active**\n\n"
+                    "Bot is already operating normally.",
+                    ephemeral=True
+                )
+                return
+            
+            state = set_lockdown_state(False)
+            
+            await interaction.followup.send(
+                "🔓 **Lockdown DISABLED**\n\n"
+                "Bot is now operating normally. All commands are available.",
+                ephemeral=True
+            )
+            
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
 
 def create_control_panel_embed():
     """Create embed for control panel"""
+    # Check lockdown status
+    lockdown_status = "🔴 **LOCKDOWN ACTIVE**" if is_lockdown_active() else "🟢 Normal Operation"
+    if is_lockdown_active():
+        state = get_lockdown_state()
+        lockdown_status += f"\n└ Reason: {state.get('reason', 'N/A')}"
+    
     embed = discord.Embed(
         title="⚡ GOD MODE CONTROL PANEL",
         description=(
             "**System Controls**\n"
             "Essential bot management functions\n\n"
-            f"🔐 **Access:** <@{GOD_MODE_USER_ID}> only"
+            f"🔐 **Access:** <@{GOD_MODE_USER_ID}> only\n"
+            f"📡 **Status:** {lockdown_status}"
         ),
         color=0xFF0000,
         timestamp=datetime.datetime.now()
@@ -309,12 +652,17 @@ def create_control_panel_embed():
     )
     
     embed.add_field(
-        name="🔐 Row 3: Security",
-        value="• **Clear Channels** - Remove all channel restrictions",
+        name="🌐 Row 3: Global Controls",
+        value=(
+            "• **Clear Channels** - Remove all channel restrictions\n"
+            "• **Announcement** - Send message to ALL servers\n"
+            "• **Lock Down** - Restrict bot (maintenance mode)\n"
+            "• **Unlock** - Disable lockdown"
+        ),
         inline=False
     )
     
-    embed.set_footer(text="Control Panel v2.3 - With Full Data Sync")
+    embed.set_footer(text="Control Panel v2.4 - With Global Announcement & Lockdown")
     
     return embed
 

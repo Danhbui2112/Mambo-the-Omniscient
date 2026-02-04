@@ -4,6 +4,7 @@ discord-py-interactions==5.11.0
 
 # Google Sheets (Keep for now, can remove later)
 gspread==5.12.0
+gspread-formatting==1.2.1
 google-auth==2.23.4
 google-auth-oauthlib==1.1.0
 google-auth-httplib2==0.1.1
@@ -27,3 +28,4 @@ requests==2.31.0
 python-dotenv==1.0.0
 pytz==2023.3.post1
 wcwidth==0.2.12
+rapidfuzz==3.5.2

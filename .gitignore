@@ -6,6 +6,7 @@ credentials.json
 *.json.backup
 .cache/
 .local/
+bot-hosting.py
 
 # =============================================================================
 # Cache & Data Files

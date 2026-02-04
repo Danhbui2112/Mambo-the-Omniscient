@@ -336,7 +336,7 @@ class BotConfig:
     
     def __post_init__(self):
         # Load from environment variables for security
-        self.GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID', '13-FoOHTQ7hiTN8LyERdbeS6HgO6npt0Ew7MbUAf-4PA')
+        self.GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID', '')  # Must be set in .env
         self.ADMIN_ROLE_IDS = parse_int_list('ADMIN_ROLE_IDS')
         
         # Support both singular and plural format for GOD_MODE_USER_ID(S)

@@ -1,7 +1,6 @@
 """
 Auto-Sync Helpers Module
 Provides helper functions for fetching club data from uma.moe API
-Used by bot.py for /search_club command and manual club sync
 """
 
 import aiohttp
@@ -9,13 +8,14 @@ import asyncio
 from typing import Dict, Optional, List
 
 
-async def fetch_circle_data(circle_id: str, timeout: int = 15) -> Optional[Dict]:
+async def fetch_circle_data(circle_id: str, timeout: int = 15, proxy_url: str = None) -> Optional[Dict]:
     """
     Fetch circle (club) data from uma.moe API using circle_id
     
     Args:
         circle_id: The circle/club ID to fetch
         timeout: Request timeout in seconds
+        proxy_url: Optional proxy URL for rotation (e.g., "http://user:pass@ip:port")
     
     Returns:
         Dict with circle data or None if not found
@@ -45,7 +45,11 @@ async def fetch_circle_data(circle_id: str, timeout: int = 15) -> Optional[Dict]
     
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as response:
+            async with session.get(
+                url, 
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                proxy=proxy_url
+            ) as response:
                 if response.status == 200:
                     data = await response.json()
                     
@@ -57,6 +61,9 @@ async def fetch_circle_data(circle_id: str, timeout: int = 15) -> Optional[Dict]
                         # If not found by ID, return first circle (user's club)
                         return data[0] if data else None
                     elif isinstance(data, dict):
+                        # New format: {"circle": {...}, "members": [...]}
+                        if 'circle' in data:
+                            return data['circle']
                         return data
                     
                     return None

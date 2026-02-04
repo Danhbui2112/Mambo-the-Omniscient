@@ -22,7 +22,7 @@ from auto_sync_helpers import (
 from config import config, BotConfig, SCRIPT_DIR
 from models import SmartCache, CROSS_CLUB_CACHE, ProxyManager, gs_manager
 from utils import log_error, format_fans, get_last_update_timestamp, save_last_update_timestamp
-from managers import add_support_footer, SCHEDULE_COLORS
+from managers import add_support_footer, maybe_send_promo_message, load_profile_links, save_profile_link, SCHEDULE_COLORS
 
 import aiohttp
 import json
@@ -239,117 +239,11 @@ pending_verifications = {}
 
 
 
-
-def add_support_footer(embed: discord.Embed, extra_text: str = "") -> discord.Embed:
-    """
-    Add support server link to embed footer with embedded link
-    
-    Args:
-        embed: Discord embed to add footer to
-        extra_text: Optional additional text before support message
-    
-    Returns:
-        Modified embed with support footer containing embedded link
-    """
-    # Use Discord markdown format for embedded link: [text](url)
-    footer_link = f"[{SUPPORT_MESSAGE}]({SUPPORT_SERVER_URL})"
-    
-    if extra_text:
-        footer_text = f"{extra_text}\n{footer_link}"
-    else:
-        footer_text = footer_link
-    
-    embed.set_footer(text=footer_text)
-    return embed
-
-
-async def maybe_send_promo_message(interaction: discord.Interaction):
-    """
-    Maybe send a promotional message with donation & vote links.
-    Based on random chance (25%) and user cooldown (1 minute).
-    Sends as PUBLIC message (not ephemeral).
-    """
-    import random
-    import time as time_module
-    
-    user_id = interaction.user.id
-    current_time = time_module.time()
-    
-    # Check cooldown
-    if user_id in promo_cooldowns:
-        time_since_last = current_time - promo_cooldowns[user_id]
-        if time_since_last < PROMO_COOLDOWN:
-            return  # Still in cooldown
-    
-    # Random chance check (25%)
-    if random.random() > PROMO_CHANCE:
-        return  # Not this time
-    
-    # Update cooldown
-    promo_cooldowns[user_id] = current_time
-    
-    # Create promo embed
-    embed = discord.Embed(
-        title="💝 Support the Bot!",
-        description="If you find this bot helpful, consider support the bot!",
-        color=discord.Color.from_str("#FF69B4")  # Pink color
-    )
-    
-    embed.add_field(
-        name="☕ Donation",
-        value=f"[{DONATION_MESSAGE}]({DONATION_URL})",
-        inline=True
-    )
-    
-    embed.add_field(
-        name="⭐ Vote",
-        value=f"[{VOTE_MESSAGE}]({VOTE_URL})",
-        inline=True
-    )
-    
-    embed.set_footer(text="Thank you for your support! 💕")
-    
-    try:
-        # Send as PUBLIC message (not ephemeral)
-        await interaction.followup.send(embed=embed)
-    except Exception as e:
-        print(f"Error sending promo message: {e}")
-
-
 # ============================================================================
 # PROFILE VERIFICATION HELPERS
+# NOTE: Profile manager functions (add_support_footer, maybe_send_promo_message,
+# load_profile_links, save_profile_link) imported from managers.profile_manager
 # ============================================================================
-
-def load_profile_links() -> dict:
-    """Load Discord ID -> Trainer ID mappings from file"""
-    if os.path.exists(PROFILE_LINKS_FILE):
-        try:
-            with open(PROFILE_LINKS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            pass
-    return {}
-
-def save_profile_link(discord_id: int, trainer_id: str, member_name: str, club_name: str, viewer_id: str = None):
-    """Save a verified profile link
-    
-    Args:
-        discord_id: Discord user ID
-        trainer_id: Trainer ID from OCR (12-digit number)
-        member_name: In-game trainer name
-        club_name: Club name at time of linking
-        viewer_id: Player ID from uma.moe API (never changes even if user changes club/name)
-    """
-    links = load_profile_links()
-    links[str(discord_id)] = {
-        "viewer_id": viewer_id,  # Primary identifier - never changes
-        "trainer_id": trainer_id,
-        "member_name": member_name,
-        "club_name": club_name,
-        "linked_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
-    }
-    with open(PROFILE_LINKS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(links, f, indent=2)
 
 async def call_ocr_service(image_data: bytes) -> dict:
     """Call Node.js OCR service to extract trainer data from image"""
@@ -948,107 +842,9 @@ def invalidate_cache_for_club(club_name: str, data_sheet_name: str = None):
         return False
 
 
-def format_fans(n) -> str:
-    """Format fan count with K/M suffix"""
-    try:
-        n_int = int(float(str(n).replace(',', '')))
-    except ValueError:
-        return str(n)
-    
-    if n_int == 0:
-        return "0"
-    
-    sign = "+" if n_int > 0 else "-" if n_int < 0 else ""
-    n_abs = abs(n_int)
-    
-    if n_abs >= 1_000_000:
-        # Nếu >= 100M: chỉ hiện số nguyên (ví dụ: +139M)
-        # Nếu < 100M: hiện 1 chữ số thập phân (ví dụ: +13.6M)
-        if n_abs >= 100_000_000:
-            return f"{sign}{n_abs // 1_000_000}M"
-        else:
-            return f"{sign}{n_abs / 1_000_000:.1f}M"
-    if n_abs >= 1_000:
-        # Giữ nguyên làm tròn cho K
-        return f"{sign}{n_abs // 1_000}K"
-    
-    return f"{sign}{n_abs}"
-
-
-def format_fans_full(n) -> str:
-    """Format fan count with full number and sign"""
-    try:
-        n_int = int(float(str(n).replace(',', '')))
-    except ValueError:
-        return str(n)
-    return f"{n_int:+,}"
-
-def format_fans_billion(n) -> str:
-    """Format fan count to Billion unit"""
-    try:
-        n_int = int(float(str(n).replace(',', '')))
-    except ValueError:
-        return str(n)
-    
-    if n_int == 0:
-        return "0B"
-    
-    # Convert to billion
-    n_billion = n_int / 1_000_000_000
-    
-    if n_billion >= 10:
-        return f"{n_billion:.1f}B"
-    else:
-        return f"{n_billion:.2f}B"
-
-
-def calculate_daily_from_cumulative(cumulative: List[int]) -> List[int]:
-    """
-    Convert cumulative fan totals to daily differences
-    
-    Args:
-        cumulative: List of cumulative fan totals (one per day)
-    
-    Returns:
-        List of daily fan gains
-        
-    Example:
-        Input:  [0, 0, 238644810, 242678516, 245877460]
-        Output: [0, 0, 238644810, 4033706, 3198944]
-                            ^first    ^diff    ^diff
-    """
-    daily = []
-    for i, total in enumerate(cumulative):
-        if i == 0:
-            # First day: use total as daily (first non-zero is starting point)
-            daily.append(total if total > 0 else 0)
-        else:
-            if total > 0 and cumulative[i-1] >= 0:
-                # Calculate difference from previous day
-                diff = total - cumulative[i-1]
-                daily.append(max(0, diff))  # Prevent negative values
-            else:
-                # No data or invalid
-                daily.append(0)
-    
-    return daily
-
-
-def center_text_exact(text: str, total_width: int = 56) -> str:
-    """Center text exactly, accounting for emoji width"""
-    # Calculate actual display width
-    display_width = wcswidth(text) if wcswidth(text) != -1 else len(text)
-    
-    if display_width >= total_width:
-        return text[:total_width]
-    
-    padding_total = total_width - display_width
-    padding_left = padding_total // 2
-    padding_right = padding_total - padding_left
-    
-    result = (' ' * padding_left) + text + (' ' * padding_right)
-    return result
-
+# Phase 2: Text formatting, timestamps already imported
+# (format_fans, center_text_exact, calculate_daily_from_cumulative, 
+#  get_last_update_timestamp, save_last_update_timestamp - from utils/)
 
 def format_stat_line_compact(label: str, value: str, label_width: int = 30) -> str:
     """
@@ -1070,28 +866,6 @@ def format_stat_line_compact(label: str, value: str, label_width: int = 30) -> s
     if wcswidth(line) > 56:
         return line[:56]
     return line
-def get_last_update_timestamp() -> int:
-    """Get the last update timestamp from file"""
-    try:
-        if os.path.exists(LAST_UPDATE_FILE_PATH):
-            with open(LAST_UPDATE_FILE_PATH, "r") as f:
-                data = json.load(f)
-                return data.get("last_update_timestamp", int(time.time()))
-    except Exception as e:
-        print(f"Error reading last_update.json: {e}")
-    return int(time.time())
-
-
-def save_last_update_timestamp():
-    """Save current timestamp as last update time"""
-    try:
-        current_timestamp = int(time.time())
-        with open(LAST_UPDATE_FILE_PATH, "w") as f:
-            json.dump({"last_update_timestamp": current_timestamp}, f)
-        print(f"Update detected. Saved new timestamp {current_timestamp}")
-    except Exception as e:
-        print(f"CRITICAL: Failed to save timestamp file: {e}")
-
 
 def get_kick_note(player: pd.Series, max_day: int) -> Optional[str]:
     """Determine if a player should be kicked"""

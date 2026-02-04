@@ -1,0 +1,1 @@
+# Tournament cog package
